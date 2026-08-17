@@ -91,9 +91,8 @@ enum MailThreadParser {
     // MARK: - Thread messages
 
     /// Parse a run of `---END_MESSAGE---`-delimited blocks into messages,
-    /// sorted oldest first. Shared by the composer-context script and the
-    /// participant-scoped thread lookup, which emit the same block format.
-    static func parseThreadMessages(_ raw: String) -> [EmailMessage] {
+    /// sorted oldest first.
+    private static func parseThreadMessages(_ raw: String) -> [EmailMessage] {
         let blocks = raw
             .components(separatedBy: "---END_MESSAGE---")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

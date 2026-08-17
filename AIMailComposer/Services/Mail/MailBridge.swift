@@ -6,6 +6,7 @@ enum MailBridgeError: LocalizedError {
     case noComposer
     case mailNotRunning
     case parseError(String)
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -17,12 +18,37 @@ enum MailBridgeError: LocalizedError {
             return "Mail is not running. Open Mail and try again."
         case .parseError(let msg):
             return "Failed to parse Mail context: \(msg)"
+        case .timedOut:
+            return "Mail didn't respond in time. It may be busy syncing — try again in a moment."
         }
     }
 }
 
 final class MailBridge {
+    /// Ceiling on a single script run. The scripts also carry their own
+    /// `with timeout` blocks, which is what actually bounds each Apple Event;
+    /// this is the outer backstop so the caller can never be left awaiting a
+    /// script that never returns.
+    private static let scriptTimeout: Duration = .seconds(25)
+
     static func executeAppleScript(_ source: String) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await runScript(source)
+            }
+            group.addTask {
+                try await Task.sleep(for: scriptTimeout)
+                throw MailBridgeError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw MailBridgeError.timedOut
+            }
+            return result
+        }
+    }
+
+    private static func runScript(_ source: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var error: NSDictionary?
@@ -84,35 +110,54 @@ final class MailBridge {
             context = enrichViaAccessibility(context: context)
         }
 
-        return await recoverThreadIfMissing(context: context)
+        return expandCitedThread(context: context)
     }
 
-    /// The script emits no thread when it couldn't identify the message being
-    /// replied to — it refuses to guess from the subject alone. If this still
-    /// looks like a reply and we now know the recipients (usually recovered
-    /// via AX), retry the lookup scoped to those participants. Returns the
-    /// context unchanged on any failure.
-    private static func recoverThreadIfMissing(context: ComposerContext) async -> ComposerContext {
-        guard context.thread == nil,
-              context.looksLikeReply,
-              !context.recipients.isEmpty
-        else {
-            return context
+    /// Split the quoted chain into individual messages.
+    ///
+    /// The script hands back the replied-to message as a single block whose
+    /// body still contains the whole cited history. Splitting it here is pure
+    /// string work — no further Apple Events, so it costs nothing and can't
+    /// stall Mail.
+    ///
+    /// The compose window's own text is the better source when AX could read
+    /// it: it is literally what the reply cites, and splitting it also
+    /// separates what the user has already typed from the quoted history
+    /// below it. Falls back to the anchor message's body otherwise.
+    private static func expandCitedThread(context: ComposerContext) -> ComposerContext {
+        let anchor = context.thread?.messages.first
+
+        if !context.currentDraft.isEmpty {
+            let split = QuotedThreadParser.split(
+                body: context.currentDraft,
+                newestSender: anchor?.sender ?? "",
+                newestDate: anchor?.dateSent,
+                subject: context.subject
+            )
+            if !split.quoted.isEmpty {
+                return ComposerContext(
+                    recipients: context.recipients,
+                    subject: context.subject,
+                    currentDraft: split.typedByUser,
+                    thread: EmailThread(subject: context.subject, messages: split.quoted),
+                    composeWindowFrame: context.composeWindowFrame
+                )
+            }
         }
 
-        let base = context.baseSubject
-        guard !base.isEmpty else { return context }
+        guard let anchor else { return context }
 
-        let addresses = context.recipients.compactMap(emailAddress(from:))
-        guard !addresses.isEmpty else { return context }
-
-        let script = MailScripts.fetchThread(baseSubject: base, participants: addresses)
-        guard let raw = try? await executeAppleScript(script) else {
-            return context
-        }
-
-        let messages = MailThreadParser.parseThreadMessages(raw)
-        guard !messages.isEmpty else { return context }
+        let split = QuotedThreadParser.split(
+            body: anchor.body,
+            newestSender: anchor.sender,
+            newestDate: anchor.dateSent,
+            subject: anchor.subject
+        )
+        let messages = split.allAsThread(
+            recipients: anchor.recipients,
+            subject: anchor.subject
+        )
+        guard messages.count > 1 else { return context }
 
         return ComposerContext(
             recipients: context.recipients,
@@ -121,22 +166,6 @@ final class MailBridge {
             thread: EmailThread(subject: context.subject, messages: messages),
             composeWindowFrame: context.composeWindowFrame
         )
-    }
-
-    /// Pull the bare address out of a recipient string. AX yields display
-    /// forms like `Reinholds Bunde <mr@example.com>`, which won't substring
-    /// match against a raw address in the thread search.
-    private static func emailAddress(from raw: String) -> String? {
-        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let open = trimmed.lastIndex(of: "<"),
-           let close = trimmed[open...].firstIndex(of: ">") {
-            let inner = trimmed[trimmed.index(after: open)..<close]
-                .trimmingCharacters(in: .whitespaces)
-            return inner.contains("@") ? inner : nil
-        }
-        return trimmed.contains("@") ? trimmed : nil
     }
 
     /// Opportunistically enrich the context via the AX reader. If AX isn't

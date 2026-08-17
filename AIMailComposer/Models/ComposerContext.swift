@@ -22,28 +22,10 @@ struct ComposerContext {
     /// hides hand-opened compose windows from AppleScript — so this is what
     /// distinguishes "reply we failed to read" from "genuinely new email".
     var looksLikeReply: Bool {
-        Self.replyPrefixes.contains { subject.lowercased().hasPrefix($0) }
-    }
-
-    /// The subject with any stack of reply/forward prefixes removed.
-    var baseSubject: String {
-        Self.strippingReplyPrefixes(subject)
-    }
-
-    private static let replyPrefixes = ["re:", "fwd:", "fw:", "aw:", "wg:"]
-
-    static func strippingReplyPrefixes(_ raw: String) -> String {
-        var result = raw.trimmingCharacters(in: .whitespaces)
-        var changed = true
-        while changed {
-            changed = false
-            for prefix in replyPrefixes where result.lowercased().hasPrefix(prefix) {
-                result = String(result.dropFirst(prefix.count))
-                    .trimmingCharacters(in: .whitespaces)
-                changed = true
-            }
-        }
-        return result
+        let normalized = subject
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        return ["re:", "fwd:", "fw:", "aw:", "wg:"].contains { normalized.hasPrefix($0) }
     }
 
     var displaySubject: String {
