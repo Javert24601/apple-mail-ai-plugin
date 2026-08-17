@@ -21,6 +21,9 @@ enum QuotedThreadParser {
         let typedByUser: String
         /// Quoted messages, oldest first, to match `EmailThread` ordering.
         let quoted: [EmailMessage]
+        /// Everything from the first attribution line down, verbatim. This is
+        /// what gets sent to the model — see `EmailThread.rawChain`.
+        let quotedRaw: String
 
         /// The newest text plus the quoted chain as one thread, for when the
         /// body came from a message rather than a compose window. Returns the
@@ -69,12 +72,17 @@ enum QuotedThreadParser {
             return Split(
                 typedByUser: cleaned(lines),
                 quoted: [],
+                quotedRaw: "",
                 newestSender: newestSender,
                 newestDate: newestDate
             )
         }
 
         let head = cleaned(Array(lines[..<boundaries[0].index]))
+        // Verbatim, quote markers and all, from the first attribution down.
+        let rawChain = truncatedForPrompt(
+            lines[boundaries[0].index...].joined(separator: "\n")
+        )
 
         // Segments run newest to oldest down the body: each attribution owns
         // the text between it and the next one.
@@ -101,6 +109,7 @@ enum QuotedThreadParser {
         return Split(
             typedByUser: head,
             quoted: segments.reversed(),
+            quotedRaw: rawChain,
             newestSender: newestSender,
             newestDate: newestDate
         )
@@ -162,37 +171,60 @@ enum QuotedThreadParser {
         return text.isEmpty ? "Unknown sender" : text
     }
 
-    /// Best-effort date from an attribution line. Locale-dependent and often
-    /// absent, so a nil result is expected and harmless — ordering comes from
-    /// the chain's position, never from these dates.
+    /// Best-effort date from an attribution line. Purely cosmetic: message
+    /// order comes from position in the quoted chain, never from these dates,
+    /// so a nil result costs nothing but a "Unknown" label in the UI.
     private static func parseDate(from line: String) -> Date? {
-        let formats = [
-            "d MMM yyyy 'at' HH:mm",
-            "d MMMM yyyy 'at' HH:mm",
-            "MMM d, yyyy 'at' h:mm a",
-            "dd.MM.yyyy 'um' HH:mm",
-        ]
+        let candidates = dateCandidates(in: line)
+        guard !candidates.isEmpty else { return nil }
+
         let formatter = DateFormatter()
-        for format in formats {
-            formatter.dateFormat = format
-            for candidate in dateCandidates(in: line) {
-                if let date = formatter.date(from: candidate) { return date }
+        for locale in [Locale(identifier: "en_US_POSIX"), Locale(identifier: "de_DE")] {
+            formatter.locale = locale
+            for format in dateFormats {
+                formatter.dateFormat = format
+                for candidate in candidates {
+                    if let date = formatter.date(from: candidate) { return date }
+                }
             }
         }
         return nil
     }
 
-    /// Comma-separated runs of the attribution line, longest first, so a
-    /// format spanning "17 Aug 2026 at 12:35" is tried before its fragments.
+    /// Mail writes the attribution in the sender's locale, so this covers the
+    /// layouts seen in practice rather than trying to be exhaustive.
+    private static let dateFormats = [
+        "d. M. yyyy, 'at' HH:mm",
+        "d. M. yyyy 'at' HH:mm",
+        "EEE, d MMM yyyy 'at' HH:mm",
+        "d MMM yyyy 'at' HH:mm",
+        "d MMMM yyyy 'at' HH:mm",
+        "EEE, MMM d, yyyy 'at' h:mm a",
+        "MMM d, yyyy 'at' h:mm a",
+        "MMMM d, yyyy 'at' h:mm a",
+        "d.M.yyyy 'um' HH:mm",
+        "dd.MM.yyyy 'um' HH:mm",
+    ]
+
+    /// Comma-joined prefixes of the attribution, longest first. A date can
+    /// contain its own commas ("Mon, 17 Aug 2026 at 12:35"), so splitting on
+    /// commas alone would never reassemble it — try every prefix length and
+    /// let the trailing sender component fall away.
     private static func dateCandidates(in line: String) -> [String] {
-        let body = line
-            .replacingOccurrences(of: "On ", with: "")
-            .replacingOccurrences(of: "Am ", with: "")
-        return body
+        var body = line
+        for prefix in ["On ", "Am "] where body.hasPrefix(prefix) {
+            body = String(body.dropFirst(prefix.count))
+        }
+
+        let parts = body
             .components(separatedBy: ",")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
-            .sorted { $0.count > $1.count }
+        guard parts.count > 1 else { return parts }
+
+        return (1..<parts.count)
+            .reversed()
+            .map { parts[0..<$0].joined(separator: ", ") }
     }
 
     // MARK: - Text helpers
@@ -204,6 +236,15 @@ enum QuotedThreadParser {
             text = text.dropFirst()
         }
         return String(text).trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Long threads can carry a very large quoted chain. Keep the head,
+    /// which is the recent end of the conversation, and drop the tail.
+    private static func truncatedForPrompt(_ raw: String) -> String {
+        let limit = 40_000
+        guard raw.count > limit else { return raw }
+        let kept = raw.prefix(limit)
+        return String(kept) + "\n\n[… older messages truncated …]"
     }
 
     private static func cleaned(_ lines: [String]) -> String {

@@ -139,7 +139,11 @@ final class MailBridge {
                     recipients: context.recipients,
                     subject: context.subject,
                     currentDraft: split.typedByUser,
-                    thread: EmailThread(subject: context.subject, messages: split.quoted),
+                    thread: EmailThread(
+                        subject: context.subject,
+                        messages: split.quoted,
+                        rawChain: split.quotedRaw
+                    ),
                     composeWindowFrame: context.composeWindowFrame
                 )
             }
@@ -159,11 +163,17 @@ final class MailBridge {
         )
         guard messages.count > 1 else { return context }
 
+        // The anchor's own text sits above the chain, so hand the model the
+        // whole body: newest words first, quoted history beneath.
         return ComposerContext(
             recipients: context.recipients,
             subject: context.subject,
             currentDraft: context.currentDraft,
-            thread: EmailThread(subject: context.subject, messages: messages),
+            thread: EmailThread(
+                subject: context.subject,
+                messages: messages,
+                rawChain: anchor.body
+            ),
             composeWindowFrame: context.composeWindowFrame
         )
     }

@@ -217,13 +217,23 @@ enum MailScripts {
                 -- The viewer selection is only trusted when its subject
                 -- matches the compose window's, so an unrelated highlighted
                 -- row can never become the context.
+                --
+                -- Take the *newest* match, never the first. In conversation
+                -- view Mail hands back every message of the thread, and the
+                -- first one is typically the oldest — anchoring on it cites
+                -- only the conversation up to that point, so the model
+                -- answers a months-old message instead of the latest.
                 set anchorMsg to missing value
+                set anchorDate to missing value
                 try
                     repeat with m in (get selection)
                         try
                             if (subject of m) contains baseSubject then
-                                set anchorMsg to (contents of m)
-                                exit repeat
+                                set thisDate to (date sent of m)
+                                if anchorDate is missing value or thisDate > anchorDate then
+                                    set anchorMsg to (contents of m)
+                                    set anchorDate to thisDate
+                                end if
                             end if
                         end try
                     end repeat
@@ -235,13 +245,15 @@ enum MailScripts {
                                 repeat with m in (selected messages of mv)
                                     try
                                         if (subject of m) contains baseSubject then
-                                            set anchorMsg to (contents of m)
-                                            exit repeat
+                                            set thisDate to (date sent of m)
+                                            if anchorDate is missing value or thisDate > anchorDate then
+                                                set anchorMsg to (contents of m)
+                                                set anchorDate to thisDate
+                                            end if
                                         end if
                                     end try
                                 end repeat
                             end try
-                            if anchorMsg is not missing value then exit repeat
                         end repeat
                     end try
                 end if
