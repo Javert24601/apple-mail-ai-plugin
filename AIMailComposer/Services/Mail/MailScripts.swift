@@ -176,14 +176,20 @@ enum MailScripts {
         -- happens to share wording (e.g. a property address referenced by
         -- several different correspondents). Require the candidate message
         -- to actually involve one of the people on this reply, so only the
-        -- conversation at hand is used as context.
-        if (count of recipientAddrs) > 0 then
-            try
-                repeat with acct in accounts
-                    repeat with mbName in {"INBOX", "Sent Messages", "Sent", "Gesendet", "Archive", "Archiv", "All Mail"}
-                        try
-                            set mb to mailbox mbName of acct
-                            set candidates to (every message of mb whose subject contains baseSubject)
+        -- conversation at hand is used as context. Pass 1 sometimes can't
+        -- see `outgoing messages` at all (see doc comment above), in which
+        -- case recipientAddrs is empty not because there are no recipients
+        -- but because AppleScript never told us who they are — fall back to
+        -- the unfiltered subject search rather than silently returning no
+        -- context at all.
+        set haveParticipants to (count of recipientAddrs) > 0
+        try
+            repeat with acct in accounts
+                repeat with mbName in {"INBOX", "Sent Messages", "Sent", "Gesendet", "Archive", "Archiv", "All Mail"}
+                    try
+                        set mb to mailbox mbName of acct
+                        set candidates to (every message of mb whose subject contains baseSubject)
+                        if haveParticipants then
                             repeat with msg in candidates
                                 set msgSender to ""
                                 try
@@ -204,11 +210,13 @@ enum MailScripts {
                                     set end of threadMsgs to msg
                                 end if
                             end repeat
-                        end try
-                    end repeat
+                        else
+                            set threadMsgs to threadMsgs & candidates
+                        end if
+                    end try
                 end repeat
-            end try
-        end if
+            end repeat
+        end try
 
         set msgCount to count of threadMsgs
         if msgCount > 20 then
