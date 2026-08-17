@@ -22,6 +22,7 @@ enum MailScripts {
     static let fetchComposerContext = """
     set composeSubject to ""
     set recipientList to ""
+    set recipientAddrs to {}
     set draftContent to ""
     set composeWinL to "-"
     set composeWinT to "-"
@@ -42,8 +43,10 @@ enum MailScripts {
                 end try
                 try
                     repeat with r in to recipients of outMsg
+                        set rAddr to (address of r)
                         if recipientList is not "" then set recipientList to recipientList & ", "
-                        set recipientList to recipientList & (address of r)
+                        set recipientList to recipientList & rAddr
+                        set end of recipientAddrs to rAddr
                     end repeat
                 end try
                 try
@@ -169,17 +172,43 @@ enum MailScripts {
 
     tell application "Mail"
         set threadMsgs to {}
-        try
-            repeat with acct in accounts
-                repeat with mbName in {"INBOX", "Sent Messages", "Sent", "Gesendet", "Archive", "Archiv", "All Mail"}
-                    try
-                        set mb to mailbox mbName of acct
-                        set matches to (every message of mb whose subject contains baseSubject)
-                        set threadMsgs to threadMsgs & matches
-                    end try
+        -- Matching on subject alone pulls in every unrelated thread that
+        -- happens to share wording (e.g. a property address referenced by
+        -- several different correspondents). Require the candidate message
+        -- to actually involve one of the people on this reply, so only the
+        -- conversation at hand is used as context.
+        if (count of recipientAddrs) > 0 then
+            try
+                repeat with acct in accounts
+                    repeat with mbName in {"INBOX", "Sent Messages", "Sent", "Gesendet", "Archive", "Archiv", "All Mail"}
+                        try
+                            set mb to mailbox mbName of acct
+                            set candidates to (every message of mb whose subject contains baseSubject)
+                            repeat with msg in candidates
+                                set msgSender to ""
+                                try
+                                    set msgSender to (sender of msg)
+                                end try
+                                set msgRecipientText to ""
+                                try
+                                    repeat with r in to recipients of msg
+                                        set msgRecipientText to msgRecipientText & (address of r) & ", "
+                                    end repeat
+                                end try
+                                set isParticipant to false
+                                repeat with recAddr in recipientAddrs
+                                    if msgSender contains recAddr then set isParticipant to true
+                                    if msgRecipientText contains recAddr then set isParticipant to true
+                                end repeat
+                                if isParticipant then
+                                    set end of threadMsgs to msg
+                                end if
+                            end repeat
+                        end try
+                    end repeat
                 end repeat
-            end repeat
-        end try
+            end try
+        end if
 
         set msgCount to count of threadMsgs
         if msgCount > 20 then
