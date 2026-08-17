@@ -725,7 +725,11 @@ private struct AXPermissionBanner: View {
 
                 Text("Mail's AppleScript didn't expose the recipients or draft. "
                      + "Grant Accessibility so the plugin can read them directly "
-                     + "from the compose window.")
+                     + "from the compose window.\n"
+                     + "Already granted? macOS ties the approval to the app's "
+                     + "signature, so a new build silently invalidates it even "
+                     + "though the switch still looks on. Remove the app under "
+                     + "Privacy & Security → Accessibility, then add it again.")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
