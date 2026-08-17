@@ -712,6 +712,18 @@ private struct AXPermissionBanner: View {
     let onRetry: () -> Void
     let onDismiss: () -> Void
 
+    /// Kept out of `body` as a plain constant: concatenating this many string
+    /// literals inside a view builder makes the type checker give up.
+    private static let explanation = """
+    Mail's AppleScript didn't expose the recipients or draft. Grant \
+    Accessibility so the plugin can read them directly from the compose \
+    window.
+    Already granted? macOS ties the approval to the app's signature, so a \
+    new build silently invalidates it even though the switch still looks \
+    on. Remove the app under Privacy & Security → Accessibility, then add \
+    it again.
+    """
+
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "lock.shield.fill")
@@ -723,9 +735,7 @@ private struct AXPermissionBanner: View {
                 Text("Accessibility helps read this reply")
                     .font(.system(size: 12, weight: .semibold))
 
-                Text("Mail's AppleScript didn't expose the recipients or draft. "
-                     + "Grant Accessibility so the plugin can read them directly "
-                     + "from the compose window.")
+                Text(Self.explanation)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -17,6 +17,17 @@ struct ComposerContext {
     var hasRecipients: Bool { !recipients.isEmpty }
     var messageCount: Int { thread?.messages.count ?? 0 }
 
+    /// True when the subject carries a reply/forward prefix. A compose
+    /// window can look like a reply while carrying no thread at all — Mail
+    /// hides hand-opened compose windows from AppleScript — so this is what
+    /// distinguishes "reply we failed to read" from "genuinely new email".
+    var looksLikeReply: Bool {
+        let normalized = subject
+            .trimmingCharacters(in: .whitespaces)
+            .lowercased()
+        return ["re:", "fwd:", "fw:", "aw:", "wg:"].contains { normalized.hasPrefix($0) }
+    }
+
     var displaySubject: String {
         let trimmed = subject.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty || trimmed == "New Message" {

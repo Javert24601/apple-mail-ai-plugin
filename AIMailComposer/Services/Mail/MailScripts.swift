@@ -14,11 +14,45 @@ enum MailScripts {
     /// comment rot.
     ///
     /// Detection priority:
-    ///   1. `outgoing message 1` properties (best: gives recipients + draft)
+    ///   1. `outgoing message 1` properties (best: gives recipients + draft).
+    ///      In practice this is empty for any compose window the *user*
+    ///      opened by hand — Mail only lists messages created through
+    ///      `make new outgoing message` — so it usually only helps for
+    ///      script-created drafts.
     ///   2. Any Mail `window` that is not the `message viewer`'s window (the
     ///      list/reading pane). This covers the case on newer macOS releases
     ///      where a brand-new blank compose window doesn't show up in
-    ///      `outgoing messages`.
+    ///      `outgoing messages`. Only the window *title* is available here,
+    ///      which is why it can't supply recipients or the draft body.
+    ///   3. The message being replied to, resolved from the message viewer's
+    ///      selection and accepted only when its subject matches the compose
+    ///      window's (prefix-stripped) subject.
+    ///
+    /// ## Why the thread is one message, not a mailbox search
+    ///
+    /// Matching on `subject contains baseSubject` treats every message
+    /// sharing a phrase as one conversation. For a subject reused across
+    /// unrelated correspondences — a property address written to a
+    /// solicitor, an estate agent and a broker in separate threads — that
+    /// pulls all of them into the model's context.
+    ///
+    /// Narrowing that sweep by participant was worse: every candidate needed
+    /// `message id`, `sender` and `recipients` read off it, and each read is
+    /// a synchronous Apple Event. Across seven mailboxes per account it ran
+    /// to thousands of round trips and left Mail unresponsive.
+    ///
+    /// So no search happens at all. The thread is step 3's message — the one
+    /// being replied to — whose body already embeds the quoted chain that the
+    /// reply window cites. `QuotedThreadParser` splits that chain back into
+    /// individual messages in Swift, with no further calls into Mail.
+    ///
+    /// If no anchor message can be found, **no thread is emitted**: wrong
+    /// context is worse than none, because the model silently drafts replies
+    /// grounded in someone else's conversation.
+    ///
+    /// Every block that talks to Mail is wrapped in `with timeout`, so a busy
+    /// or stalled Mail surfaces as an AppleScript error instead of hanging
+    /// the panel on its loading state.
     static let fetchComposerContext = """
     set composeSubject to ""
     set recipientList to ""
@@ -30,9 +64,21 @@ enum MailScripts {
     set composeWinB to "-"
     set hasComposer to false
     set debugInfo to ""
+    set myAddrs to {}
 
+    with timeout of 10 seconds
     tell application "Mail"
-        -- Pass 1: outgoing message. Populates everything.
+        try
+            repeat with acct in accounts
+                try
+                    repeat with ea in (email addresses of acct)
+                        set end of myAddrs to (ea as string)
+                    end repeat
+                end try
+            end repeat
+        end try
+
+        -- Pass 1: outgoing message. Populates everything when available.
         try
             set outMsgCount to count of outgoing messages
             set debugInfo to "out:" & outMsgCount
@@ -47,6 +93,11 @@ enum MailScripts {
                         if recipientList is not "" then set recipientList to recipientList & ", "
                         set recipientList to recipientList & rAddr
                         set end of recipientAddrs to rAddr
+                    end repeat
+                end try
+                try
+                    repeat with r in cc recipients of outMsg
+                        set end of recipientAddrs to (address of r)
                     end repeat
                 end try
                 try
@@ -105,39 +156,15 @@ enum MailScripts {
             set debugInfo to debugInfo & " winErr:" & errMsg
         end try
     end tell
+    end timeout
 
     if not hasComposer then
         return "ERROR:NO_COMPOSER|" & debugInfo
     end if
 
-    -- Reply detection
-    set isReply to false
-    if composeSubject starts with "Re: " then set isReply to true
-    if composeSubject starts with "Re:" then set isReply to true
-    if composeSubject starts with "RE: " then set isReply to true
-    if composeSubject starts with "RE:" then set isReply to true
-    if composeSubject starts with "Fwd: " then set isReply to true
-    if composeSubject starts with "Fwd:" then set isReply to true
-    if composeSubject starts with "FWD: " then set isReply to true
-    if composeSubject starts with "FWD:" then set isReply to true
-    if composeSubject starts with "AW: " then set isReply to true
-    if composeSubject starts with "AW:" then set isReply to true
-    if composeSubject starts with "WG: " then set isReply to true
-    if composeSubject starts with "WG:" then set isReply to true
-
-    set output to "COMPOSER" & linefeed
-    set output to output & "SUBJECT:" & composeSubject & linefeed
-    set output to output & "TO:" & recipientList & linefeed
-    set output to output & "FRAME:" & composeWinL & "," & composeWinT & "," & composeWinR & "," & composeWinB & linefeed
-    set output to output & "DRAFT_START" & linefeed
-    set output to output & draftContent & linefeed
-    set output to output & "DRAFT_END" & linefeed
-    set output to output & "---END_COMPOSER---" & linefeed
-
-    if not isReply then
-        return output
-    end if
-
+    -- Strip reply/forward prefixes to get the bare conversation subject.
+    -- Used to (a) recognise a reply and (b) verify that the message selected
+    -- in the viewer really belongs to the thread being replied to.
     set baseSubject to composeSubject
     set changed to true
     repeat while changed
@@ -148,101 +175,162 @@ enum MailScripts {
         else if baseSubject starts with "Re:" then
             set baseSubject to text 4 thru -1 of baseSubject
             set changed to true
-        else if baseSubject starts with "RE: " then
-            set baseSubject to text 5 thru -1 of baseSubject
-            set changed to true
         else if baseSubject starts with "Fwd: " then
             set baseSubject to text 6 thru -1 of baseSubject
             set changed to true
         else if baseSubject starts with "Fwd:" then
             set baseSubject to text 5 thru -1 of baseSubject
             set changed to true
+        else if baseSubject starts with "Fw: " then
+            set baseSubject to text 5 thru -1 of baseSubject
+            set changed to true
         else if baseSubject starts with "AW: " then
             set baseSubject to text 5 thru -1 of baseSubject
+            set changed to true
+        else if baseSubject starts with "AW:" then
+            set baseSubject to text 4 thru -1 of baseSubject
             set changed to true
         else if baseSubject starts with "WG: " then
             set baseSubject to text 5 thru -1 of baseSubject
             set changed to true
+        else if baseSubject starts with "WG:" then
+            set baseSubject to text 4 thru -1 of baseSubject
+            set changed to true
         end if
     end repeat
 
-    if baseSubject is "" then
-        return output
-    end if
+    set threadBody to ""
 
-    tell application "Mail"
-        set threadMsgs to {}
-        -- Matching on subject alone pulls in every unrelated thread that
-        -- happens to share wording (e.g. a property address referenced by
-        -- several different correspondents). Require the candidate message
-        -- to actually involve one of the people on this reply, so only the
-        -- conversation at hand is used as context.
-        if (count of recipientAddrs) > 0 then
-            try
-                repeat with acct in accounts
-                    repeat with mbName in {"INBOX", "Sent Messages", "Sent", "Gesendet", "Archive", "Archiv", "All Mail"}
+    -- Resolve the message being replied to and emit it as the whole thread.
+    --
+    -- Its body already contains the quoted chain, which is the context cited
+    -- in the reply window, so one message is all we need. Earlier revisions
+    -- swept every mailbox for subject matches and then read properties off
+    -- each hit; every such read is a synchronous Apple Event, and across
+    -- seven mailboxes per account that ran into the thousands and left Mail
+    -- unresponsive. Read exactly one message instead.
+    --
+    -- "New Message" is Mail's placeholder title for an empty compose window.
+    if baseSubject is not "" and baseSubject is not "New Message" then
+        with timeout of 10 seconds
+            tell application "Mail"
+                -- The viewer selection is only trusted when its subject
+                -- matches the compose window's, so an unrelated highlighted
+                -- row can never become the context.
+                --
+                -- Take the *newest* match, never the first. In conversation
+                -- view Mail hands back every message of the thread, and the
+                -- first one is typically the oldest — anchoring on it cites
+                -- only the conversation up to that point, so the model
+                -- answers a months-old message instead of the latest.
+                set anchorMsg to missing value
+                set anchorDate to missing value
+                try
+                    repeat with m in (get selection)
                         try
-                            set mb to mailbox mbName of acct
-                            set candidates to (every message of mb whose subject contains baseSubject)
-                            repeat with msg in candidates
-                                set msgSender to ""
-                                try
-                                    set msgSender to (sender of msg)
-                                end try
-                                set msgRecipientText to ""
-                                try
-                                    repeat with r in to recipients of msg
-                                        set msgRecipientText to msgRecipientText & (address of r) & ", "
-                                    end repeat
-                                end try
-                                set isParticipant to false
-                                repeat with recAddr in recipientAddrs
-                                    if msgSender contains recAddr then set isParticipant to true
-                                    if msgRecipientText contains recAddr then set isParticipant to true
-                                end repeat
-                                if isParticipant then
-                                    set end of threadMsgs to msg
+                            if (subject of m) contains baseSubject then
+                                set thisDate to (date sent of m)
+                                if anchorDate is missing value or thisDate > anchorDate then
+                                    set anchorMsg to (contents of m)
+                                    set anchorDate to thisDate
                                 end if
-                            end repeat
+                            end if
                         end try
                     end repeat
-                end repeat
-            end try
-        end if
+                end try
+                if anchorMsg is missing value then
+                    try
+                        repeat with mv in message viewers
+                            try
+                                repeat with m in (selected messages of mv)
+                                    try
+                                        if (subject of m) contains baseSubject then
+                                            set thisDate to (date sent of m)
+                                            if anchorDate is missing value or thisDate > anchorDate then
+                                                set anchorMsg to (contents of m)
+                                                set anchorDate to thisDate
+                                            end if
+                                        end if
+                                    end try
+                                end repeat
+                            end try
+                        end repeat
+                    end try
+                end if
 
-        set msgCount to count of threadMsgs
-        if msgCount > 20 then
-            set threadMsgs to items (msgCount - 19) thru msgCount of threadMsgs
-        end if
+                if anchorMsg is not missing value then
+                    -- Mail can't report a hand-opened compose window's
+                    -- recipients. Reconstruct who the reply goes to from the
+                    -- anchor: its sender plus its other recipients, minus our
+                    -- own accounts.
+                    if recipientList is "" then
+                        set replyAddrs to {}
+                        try
+                            set end of replyAddrs to (extract address from (sender of anchorMsg))
+                        end try
+                        try
+                            repeat with r in to recipients of anchorMsg
+                                set end of replyAddrs to (address of r)
+                            end repeat
+                        end try
+                        repeat with a in replyAddrs
+                            set aStr to (a as string)
+                            if aStr is not "" and myAddrs does not contain aStr then
+                                if recipientList does not contain aStr then
+                                    if recipientList is not "" then set recipientList to recipientList & ", "
+                                    set recipientList to recipientList & aStr
+                                end if
+                            end if
+                        end repeat
+                    end if
 
-        repeat with msg in threadMsgs
-            set output to output & "FROM:" & (sender of msg) & linefeed
-            try
-                set rList to ""
-                repeat with r in to recipients of msg
-                    if rList is not "" then set rList to rList & ", "
-                    set rList to rList & (address of r)
-                end repeat
-                set output to output & "TO:" & rList & linefeed
-            on error
-                set output to output & "TO:unknown" & linefeed
-            end try
-            set output to output & "SUBJECT:" & (subject of msg) & linefeed
-            try
-                set output to output & "DATE:" & (date sent of msg as string) & linefeed
-            on error
-                set output to output & "DATE:Unknown" & linefeed
-            end try
-            set output to output & "BODY_START" & linefeed
-            try
-                set output to output & (content of msg) & linefeed
-            on error
-                set output to output & "(unable to read body)" & linefeed
-            end try
-            set output to output & "BODY_END" & linefeed
-            set output to output & "---END_MESSAGE---" & linefeed
-        end repeat
-    end tell
+                    try
+                        set threadBody to threadBody & "FROM:" & (sender of anchorMsg) & linefeed
+                    on error
+                        set threadBody to threadBody & "FROM:unknown" & linefeed
+                    end try
+                    try
+                        set rList to ""
+                        repeat with r in to recipients of anchorMsg
+                            if rList is not "" then set rList to rList & ", "
+                            set rList to rList & (address of r)
+                        end repeat
+                        set threadBody to threadBody & "TO:" & rList & linefeed
+                    on error
+                        set threadBody to threadBody & "TO:unknown" & linefeed
+                    end try
+                    try
+                        set threadBody to threadBody & "SUBJECT:" & (subject of anchorMsg) & linefeed
+                    on error
+                        set threadBody to threadBody & "SUBJECT:" & baseSubject & linefeed
+                    end try
+                    try
+                        set threadBody to threadBody & "DATE:" & (date sent of anchorMsg as string) & linefeed
+                    on error
+                        set threadBody to threadBody & "DATE:Unknown" & linefeed
+                    end try
+                    set threadBody to threadBody & "BODY_START" & linefeed
+                    try
+                        set threadBody to threadBody & (content of anchorMsg) & linefeed
+                    on error
+                        set threadBody to threadBody & "(unable to read body)" & linefeed
+                    end try
+                    set threadBody to threadBody & "BODY_END" & linefeed
+                    set threadBody to threadBody & "---END_MESSAGE---" & linefeed
+                end if
+            end tell
+        end timeout
+    end if
+
+    set output to "COMPOSER" & linefeed
+    set output to output & "SUBJECT:" & composeSubject & linefeed
+    set output to output & "TO:" & recipientList & linefeed
+    set output to output & "FRAME:" & composeWinL & "," & composeWinT & "," & composeWinR & "," & composeWinB & linefeed
+    set output to output & "DRAFT_START" & linefeed
+    set output to output & draftContent & linefeed
+    set output to output & "DRAFT_END" & linefeed
+    set output to output & "---END_COMPOSER---" & linefeed
+    set output to output & threadBody
     return output
     """
 

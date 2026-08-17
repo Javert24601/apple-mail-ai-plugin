@@ -90,6 +90,8 @@ enum MailThreadParser {
 
     // MARK: - Thread messages
 
+    /// Parse a run of `---END_MESSAGE---`-delimited blocks into messages,
+    /// sorted oldest first.
     private static func parseThreadMessages(_ raw: String) -> [EmailMessage] {
         let blocks = raw
             .components(separatedBy: "---END_MESSAGE---")

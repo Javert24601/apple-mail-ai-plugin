@@ -6,6 +6,7 @@ enum MailBridgeError: LocalizedError {
     case noComposer
     case mailNotRunning
     case parseError(String)
+    case timedOut
 
     var errorDescription: String? {
         switch self {
@@ -17,12 +18,37 @@ enum MailBridgeError: LocalizedError {
             return "Mail is not running. Open Mail and try again."
         case .parseError(let msg):
             return "Failed to parse Mail context: \(msg)"
+        case .timedOut:
+            return "Mail didn't respond in time. It may be busy syncing — try again in a moment."
         }
     }
 }
 
 final class MailBridge {
+    /// Ceiling on a single script run. The scripts also carry their own
+    /// `with timeout` blocks, which is what actually bounds each Apple Event;
+    /// this is the outer backstop so the caller can never be left awaiting a
+    /// script that never returns.
+    private static let scriptTimeout: Duration = .seconds(25)
+
     static func executeAppleScript(_ source: String) async throws -> String {
+        try await withThrowingTaskGroup(of: String.self) { group in
+            group.addTask {
+                try await runScript(source)
+            }
+            group.addTask {
+                try await Task.sleep(for: scriptTimeout)
+                throw MailBridgeError.timedOut
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else {
+                throw MailBridgeError.timedOut
+            }
+            return result
+        }
+    }
+
+    private static func runScript(_ source: String) async throws -> String {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var error: NSDictionary?
@@ -57,8 +83,10 @@ final class MailBridge {
     /// AppleScript context is returned as-is so the UI can offer a
     /// dismissible banner instead of a permission wall.
     ///
-    /// Never reads from the message list — the compose window is the source
-    /// of truth.
+    /// The compose window stays the source of truth for *which* conversation
+    /// this is. The viewer's selected message is consulted only to resolve
+    /// that conversation, and only when its subject matches the compose
+    /// window's — so a stray highlighted row can never become the context.
     static func fetchComposerContext() async throws -> ComposerContext {
         guard await isMailRunning() else {
             throw MailBridgeError.mailNotRunning
@@ -70,17 +98,84 @@ final class MailBridge {
             throw MailBridgeError.noComposer
         }
 
-        let context = try MailThreadParser.parseComposerContext(raw)
+        var context = try MailThreadParser.parseComposerContext(raw)
 
-        // If Pass 1 (outgoing messages) found nothing but Pass 2 identified
-        // a compose window by name, the AppleScript path is broken (recent
-        // macOS versions). Fall back to the Accessibility reader when
-        // permission is granted; otherwise return the context as-is.
-        if context.recipients.isEmpty && context.currentDraft.isEmpty {
-            return enrichViaAccessibility(context: context)
+        // An empty draft means Pass 1 (`outgoing messages`) never saw the
+        // compose window — the usual case for a reply the user opened by
+        // hand. The script can reconstruct the recipients from the message
+        // being replied to, but never the draft body, so AX is still the
+        // only way to read what's actually typed in the window. Prefer it
+        // whenever it's available; otherwise return the context as-is.
+        if context.currentDraft.isEmpty {
+            context = enrichViaAccessibility(context: context)
         }
 
-        return context
+        return expandCitedThread(context: context)
+    }
+
+    /// Split the quoted chain into individual messages.
+    ///
+    /// The script hands back the replied-to message as a single block whose
+    /// body still contains the whole cited history. Splitting it here is pure
+    /// string work — no further Apple Events, so it costs nothing and can't
+    /// stall Mail.
+    ///
+    /// The compose window's own text is the better source when AX could read
+    /// it: it is literally what the reply cites, and splitting it also
+    /// separates what the user has already typed from the quoted history
+    /// below it. Falls back to the anchor message's body otherwise.
+    private static func expandCitedThread(context: ComposerContext) -> ComposerContext {
+        let anchor = context.thread?.messages.first
+
+        if !context.currentDraft.isEmpty {
+            let split = QuotedThreadParser.split(
+                body: context.currentDraft,
+                newestSender: anchor?.sender ?? "",
+                newestDate: anchor?.dateSent,
+                subject: context.subject
+            )
+            if !split.quoted.isEmpty {
+                return ComposerContext(
+                    recipients: context.recipients,
+                    subject: context.subject,
+                    currentDraft: split.typedByUser,
+                    thread: EmailThread(
+                        subject: context.subject,
+                        messages: split.quoted,
+                        rawChain: split.quotedRaw
+                    ),
+                    composeWindowFrame: context.composeWindowFrame
+                )
+            }
+        }
+
+        guard let anchor else { return context }
+
+        let split = QuotedThreadParser.split(
+            body: anchor.body,
+            newestSender: anchor.sender,
+            newestDate: anchor.dateSent,
+            subject: anchor.subject
+        )
+        let messages = split.allAsThread(
+            recipients: anchor.recipients,
+            subject: anchor.subject
+        )
+        guard messages.count > 1 else { return context }
+
+        // The anchor's own text sits above the chain, so hand the model the
+        // whole body: newest words first, quoted history beneath.
+        return ComposerContext(
+            recipients: context.recipients,
+            subject: context.subject,
+            currentDraft: context.currentDraft,
+            thread: EmailThread(
+                subject: context.subject,
+                messages: messages,
+                rawChain: anchor.body
+            ),
+            composeWindowFrame: context.composeWindowFrame
+        )
     }
 
     /// Opportunistically enrich the context via the AX reader. If AX isn't
@@ -99,9 +194,13 @@ final class MailBridge {
 
         let thread = context.thread
         let subject = ax.subject.isEmpty ? context.subject : ax.subject
+        // The script may already have reconstructed recipients from the
+        // message being replied to. Only let AX override that when it
+        // actually found some, so a partial AX read can't blank them out.
+        let recipients = ax.recipients.isEmpty ? context.recipients : ax.recipients
 
         return ComposerContext(
-            recipients: ax.recipients,
+            recipients: recipients,
             subject: subject,
             currentDraft: ax.draftContent,
             thread: thread,

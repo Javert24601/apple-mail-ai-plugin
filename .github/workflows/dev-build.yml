@@ -1,0 +1,27 @@
+name: Dev Build
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build and ad-hoc sign
+        run: make sign
+
+      - name: Zip app
+        run: |
+          cd build
+          ditto -c -k --keepParent "Apple Mail AI Plugin.app" "AIMailComposer-dev.zip"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AIMailComposer-dev-build
+          path: build/AIMailComposer-dev.zip
+          retention-days: 14

@@ -67,13 +67,17 @@ final class ComposerViewModel: ObservableObject {
             let context = try await MailBridge.fetchComposerContext()
             self.context = context
             // Sharp "AppleScript is actually broken" signal: a reply always
-            // has recipients, so a non-empty thread with no recipients means
-            // the API is lying. A blank new-message compose (thread == nil)
-            // is legitimately empty and must not trigger the banner.
+            // has recipients, so no recipients means the API is lying. A
+            // reply is recognised either by having found a thread or by the
+            // subject's Re:/Fwd: prefix — the latter matters because a reply
+            // we failed to read has no thread either, and that case would
+            // otherwise be silently indistinguishable from a new email. A
+            // blank new-message compose is legitimately empty and must not
+            // trigger the banner.
             showsAccessibilityBanner =
                 !AXPermissionChecker.isGranted()
-                && context.thread != nil
                 && context.recipients.isEmpty
+                && (context.thread != nil || context.looksLikeReply)
             state = .ready
         } catch {
             state = .error(error.localizedDescription)

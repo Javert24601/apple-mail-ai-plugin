@@ -9,6 +9,9 @@ enum SystemPrompt {
 
         ## Rules
         - Output ONLY the body text. No explanations, no markdown, no subject line.
+        - Reply to the MOST RECENT message in the thread. Older messages are \
+        background only — do not answer points that were already resolved further \
+        down the conversation.
         - Match the greeting style of the thread when one exists (e.g. "Hi Sarah," or \
         "Dear Mr. Smith,"). For a new email with no thread, pick a greeting appropriate \
         to the recipient and register.
@@ -99,6 +102,8 @@ enum SystemPrompt {
         - Prefer concrete details (dates, numbers, names) over vague summaries.
         - If the thread is in German, write the summary in German. If English, in \
         English. Match the language of the most recent message.
+        - Weight the most recent messages most heavily. Where a later message \
+        supersedes an earlier one, report the later state, not the earlier.
         - No filler. Skip phrases like "this thread discusses" or "in summary". Go \
         straight to the substance.
         - Do not invent facts. If something is unclear in the thread, say so plainly.
